@@ -10,8 +10,10 @@ data class BridgelinePacket(
     val priority: Int,
     val peopleCount: Int,
     val status: String,
-    val isSOS: Boolean
+    val isSOS: Boolean,
+    val ttl: Int = 15
 ) {
+
     fun toJson(): String {
         return JSONObject().apply {
             put("id", id)
@@ -22,10 +24,12 @@ data class BridgelinePacket(
             put("peopleCount", peopleCount)
             put("status", status)
             put("isSOS", isSOS)
+            put("ttl", ttl)
         }.toString()
     }
 
     companion object {
+
         fun fromJson(json: String): BridgelinePacket {
             val obj = JSONObject(json)
 
@@ -37,7 +41,8 @@ data class BridgelinePacket(
                 priority = obj.getInt("priority"),
                 peopleCount = obj.getInt("peopleCount"),
                 status = obj.getString("status"),
-                isSOS = obj.getBoolean("isSOS")
+                isSOS = obj.getBoolean("isSOS"),
+                ttl = obj.optInt("ttl", 15)
             )
         }
     }

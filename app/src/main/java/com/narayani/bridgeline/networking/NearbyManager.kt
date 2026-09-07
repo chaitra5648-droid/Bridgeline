@@ -16,24 +16,46 @@ import com.google.android.gms.nearby.connection.PayloadTransferUpdate
 import com.google.android.gms.nearby.connection.Strategy
 
 class NearbyManager(
-    appContext: Context,
+    context: Context,
     private val isMasterNode: Boolean,
     private val onPacketReceived: (BridgelinePacket) -> Unit,
     private val onRelay: (BridgelinePacket) -> Unit
 ) {
 
     private val connectionsClient =
-        Nearby.getConnectionsClient(appContext)
+        Nearby.getConnectionsClient(context.applicationContext)
 
-    private val connectedEndpoints = mutableSetOf<String>()
-    private val seenPacketIds = mutableSetOf<String>()
+
+    private val connectedEndpoints =
+        mutableSetOf<String>()
+
+    private val pendingConnections =
+        mutableSetOf<String>()
+
+
+    private val seenPacketIds =
+        mutableSetOf<String>()
+
+
+    private val relayedPacketIds =
+        mutableSetOf<String>()
 
     companion object {
-        private const val TAG = "NearbyManager"
-        private const val SERVICE_ID = "com.narayani.bridgeline"
-        private const val DEVICE_NAME = "Bridgeline Device"
-        private val STRATEGY = Strategy.P2P_CLUSTER
+
+        private const val TAG =
+            "NearbyManager"
+
+        private const val SERVICE_ID =
+            "com.narayani.bridgeline"
+
+        private const val DEVICE_NAME =
+            "Bridgeline Device"
+
+        private val STRATEGY =
+            Strategy.P2P_CLUSTER
     }
+
+
 
     private val payloadCallback =
         object : PayloadCallback() {
@@ -42,14 +64,47 @@ class NearbyManager(
                 endpointId: String,
                 payload: Payload
             ) {
+
                 if (payload.type != Payload.Type.BYTES) {
+
+                    Log.d(
+                        TAG,
+                        "Ignoring non-byte payload"
+                    )
+
                     return
                 }
 
-                val bytes = payload.asBytes() ?: return
-                val json = bytes.toString(Charsets.UTF_8)
+                val bytes =
+                    payload.asBytes()
+
+                if (bytes == null) {
+
+                    Log.e(
+                        TAG,
+                        "Received empty payload"
+                    )
+
+                    return
+                }
+
+                val json =
+                    bytes.toString(
+                        Charsets.UTF_8
+                    )
+
+                Log.d(
+                    TAG,
+                    "Payload received from $endpointId"
+                )
+
+                Log.d(
+                    TAG,
+                    "JSON: $json"
+                )
 
                 try {
+
                     val packet =
                         BridgelinePacket.fromJson(json)
 
@@ -58,44 +113,135 @@ class NearbyManager(
                         "Packet received: ${packet.id}"
                     )
 
-                    if (seenPacketIds.contains(packet.id)) {
+                    /*
+                     * Duplicate protection.
+                     */
+                    synchronized(seenPacketIds) {
+
+                        if (
+                            seenPacketIds.contains(
+                                packet.id
+                            )
+                        ) {
+
+                            Log.d(
+                                TAG,
+                                "Duplicate ignored: ${packet.id}"
+                            )
+
+                            return
+                        }
+
+                        seenPacketIds.add(
+                            packet.id
+                        )
+                    }
+
+
+                    /*
+                     * EVERY node displays the packet it receives.
+                     */
+                    onPacketReceived(packet)
+
+
+                    /*
+                     * MASTER IS THE DESTINATION.
+                     *
+                     * Therefore the master does NOT relay.
+                     */
+                    if (isMasterNode) {
+
                         Log.d(
                             TAG,
-                            "Duplicate ignored: ${packet.id}"
+                            "MASTER received packet ${packet.id}"
                         )
+
                         return
                     }
 
-                    seenPacketIds.add(packet.id)
 
-                    onPacketReceived(packet)
 
-                    if (!isMasterNode) {
-                        relayPacket(
-                            packet,
-                            endpointId
+                    if (packet.ttl <= 0) {
+
+                        Log.d(
+                            TAG,
+                            "TTL expired for ${packet.id}"
+                        )
+
+                        return
+                    }
+
+
+
+                    synchronized(relayedPacketIds) {
+
+                        if (
+                            relayedPacketIds.contains(
+                                packet.id
+                            )
+                        ) {
+
+                            Log.d(
+                                TAG,
+                                "Already relayed ${packet.id}"
+                            )
+
+                            return
+                        }
+
+                        relayedPacketIds.add(
+                            packet.id
                         )
                     }
 
-                } catch (exception: Exception) {
+
+                    val relayPacket =
+                        packet.copy(
+                            ttl = packet.ttl - 1,
+                            status = "RELAYED"
+                        )
+
+
+                    Log.d(
+                        TAG,
+                        "Relaying ${packet.id}: " +
+                                "${packet.ttl} -> ${relayPacket.ttl}"
+                    )
+
+
+                    relayPacket(
+                        relayPacket,
+                        endpointId
+                    )
+                }
+
+                catch (exception: Exception) {
+
                     Log.e(
                         TAG,
-                        "Invalid packet",
+                        "Invalid packet received",
                         exception
                     )
                 }
             }
 
+
             override fun onPayloadTransferUpdate(
                 endpointId: String,
                 update: PayloadTransferUpdate
             ) {
+
                 Log.d(
                     TAG,
-                    "Payload transfer: ${update.status}"
+                    "Payload transfer " +
+                            "endpoint=$endpointId " +
+                            "status=${update.status} " +
+                            "bytes=${update.bytesTransferred}"
                 )
             }
         }
+
+
 
     private val connectionLifecycleCallback =
         object : ConnectionLifecycleCallback() {
@@ -104,10 +250,15 @@ class NearbyManager(
                 endpointId: String,
                 connectionInfo: ConnectionInfo
             ) {
+
                 Log.d(
                     TAG,
-                    "Connection initiated with ${connectionInfo.endpointName}"
+                    "Connection initiated with " +
+                            "${connectionInfo.endpointName} " +
+                            "[$endpointId]"
                 )
+
+
 
                 connectionsClient
                     .acceptConnection(
@@ -115,58 +266,110 @@ class NearbyManager(
                         payloadCallback
                     )
                     .addOnSuccessListener {
+
                         Log.d(
                             TAG,
                             "Connection accepted: $endpointId"
                         )
                     }
-                    .addOnFailureListener {
+                    .addOnFailureListener { error ->
+
                         Log.e(
                             TAG,
-                            "Could not accept connection",
-                            it
+                            "Could not accept connection: $endpointId",
+                            error
                         )
                     }
             }
+
 
             override fun onConnectionResult(
                 endpointId: String,
                 result: ConnectionResolution
             ) {
+
+
+                synchronized(pendingConnections) {
+
+                    pendingConnections.remove(
+                        endpointId
+                    )
+                }
+
+
                 if (result.status.isSuccess) {
 
-                    connectedEndpoints.add(
-                        endpointId
+                    synchronized(connectedEndpoints) {
+
+                        connectedEndpoints.add(
+                            endpointId
+                        )
+                    }
+
+                    Log.d(
+                        TAG,
+                        "================================"
                     )
 
                     Log.d(
                         TAG,
-                        "CONNECTED to $endpointId"
+                        "CONNECTED: $endpointId"
+                    )
+
+                    Log.d(
+                        TAG,
+                        "Connected devices: " +
+                                connectedEndpoints.size
+                    )
+
+                    Log.d(
+                        TAG,
+                        "================================"
                     )
 
                 } else {
 
                     Log.e(
                         TAG,
-                        "Connection failed: $endpointId"
+                        "CONNECTION FAILED: $endpointId"
+
                     )
                 }
             }
+
 
             override fun onDisconnected(
                 endpointId: String
             ) {
 
-                connectedEndpoints.remove(
-                    endpointId
+                synchronized(connectedEndpoints) {
+
+                    connectedEndpoints.remove(
+                        endpointId
+                    )
+                }
+
+                synchronized(pendingConnections) {
+
+                    pendingConnections.remove(
+                        endpointId
+                    )
+                }
+
+                Log.d(
+                    TAG,
+                    "Disconnected: $endpointId"
                 )
 
                 Log.d(
                     TAG,
-                    "Disconnected from $endpointId"
+                    "Connected devices: " +
+                            connectedEndpoints.size
                 )
             }
         }
+
+
 
     private val endpointDiscoveryCallback =
         object : EndpointDiscoveryCallback() {
@@ -178,32 +381,117 @@ class NearbyManager(
 
                 Log.d(
                     TAG,
-                    "Found: ${info.endpointName}"
+                    "================================"
                 )
 
-                if (!connectedEndpoints.contains(endpointId)) {
+                Log.d(
+                    TAG,
+                    "FOUND DEVICE"
+                )
 
-                    connectionsClient
-                        .requestConnection(
-                            DEVICE_NAME,
-                            endpointId,
-                            connectionLifecycleCallback
+                Log.d(
+                    TAG,
+                    "Name: ${info.endpointName}"
+                )
+
+                Log.d(
+                    TAG,
+                    "Endpoint: $endpointId"
+                )
+
+                Log.d(
+                    TAG,
+                    "================================"
+                )
+
+
+                /*
+                 * Already connected?
+                 */
+                synchronized(connectedEndpoints) {
+
+                    if (
+                        connectedEndpoints.contains(
+                            endpointId
                         )
-                        .addOnSuccessListener {
-                            Log.d(
-                                TAG,
-                                "Connection request sent"
-                            )
-                        }
-                        .addOnFailureListener {
-                            Log.e(
-                                TAG,
-                                "Connection request failed",
-                                it
-                            )
-                        }
+                    ) {
+
+                        Log.d(
+                            TAG,
+                            "Already connected to $endpointId"
+                        )
+
+                        return
+                    }
                 }
+
+
+                /*
+                 * Connection already being requested?
+                 */
+                synchronized(pendingConnections) {
+
+                    if (
+                        pendingConnections.contains(
+                            endpointId
+                        )
+                    ) {
+
+                        Log.d(
+                            TAG,
+                            "Connection already pending: " +
+                                    endpointId
+                        )
+
+                        return
+                    }
+
+                    pendingConnections.add(
+                        endpointId
+                    )
+                }
+
+
+                Log.d(
+                    TAG,
+                    "Requesting connection to $endpointId"
+                )
+
+
+                connectionsClient
+                    .requestConnection(
+                        DEVICE_NAME,
+                        endpointId,
+                        connectionLifecycleCallback
+                    )
+                    .addOnSuccessListener {
+
+                        Log.d(
+                            TAG,
+                            "Connection request sent: " +
+                                    endpointId
+                        )
+                    }
+                    .addOnFailureListener { error ->
+
+                        synchronized(
+                            pendingConnections
+                        ) {
+
+                            pendingConnections.remove(
+                                endpointId
+                            )
+                        }
+
+                        Log.e(
+                            TAG,
+                            "Connection request failed: " +
+                                    endpointId,
+                            error
+                        )
+                    }
             }
+
 
             override fun onEndpointLost(
                 endpointId: String
@@ -211,21 +499,60 @@ class NearbyManager(
 
                 Log.d(
                     TAG,
-                    "Lost: $endpointId"
+                    "Endpoint lost: $endpointId"
                 )
+
+                /*
+                 * Do NOT immediately remove the connection
+                 * here. Endpoint discovery loss and connection
+                 * loss are different things in Nearby.
+                 */
             }
         }
+
+
+
 
     fun start() {
 
         Log.d(
             TAG,
-            "Starting Bridgeline network"
+            "================================"
         )
 
+        Log.d(
+            TAG,
+            "STARTING BRIDGELINE NETWORK"
+        )
+
+        Log.d(
+            TAG,
+            if (isMasterNode) {
+                "MODE: MASTER"
+            } else {
+                "MODE: RELAY"
+            }
+        )
+
+        Log.d(
+            TAG,
+            "================================"
+        )
+
+
+        /*
+         * Both MASTER and RELAY nodes advertise.
+         */
         startAdvertising()
+
+
+        /*
+         * Both MASTER and RELAY nodes discover.
+         */
         startDiscovery()
     }
+
+
 
     private fun startAdvertising() {
 
@@ -233,6 +560,7 @@ class NearbyManager(
             AdvertisingOptions.Builder()
                 .setStrategy(STRATEGY)
                 .build()
+
 
         connectionsClient
             .startAdvertising(
@@ -242,19 +570,22 @@ class NearbyManager(
                 options
             )
             .addOnSuccessListener {
+
                 Log.d(
                     TAG,
-                    "Advertising started"
+                    "Advertising started successfully"
                 )
             }
-            .addOnFailureListener {
+            .addOnFailureListener { error ->
+
                 Log.e(
                     TAG,
                     "Advertising failed",
-                    it
+                    error
                 )
             }
     }
+
 
     private fun startDiscovery() {
 
@@ -263,6 +594,7 @@ class NearbyManager(
                 .setStrategy(STRATEGY)
                 .build()
 
+
         connectionsClient
             .startDiscovery(
                 SERVICE_ID,
@@ -270,92 +602,225 @@ class NearbyManager(
                 options
             )
             .addOnSuccessListener {
+
                 Log.d(
                     TAG,
-                    "Discovery started"
+                    "Discovery started successfully"
                 )
             }
-            .addOnFailureListener {
+            .addOnFailureListener { error ->
+
                 Log.e(
                     TAG,
                     "Discovery failed",
-                    it
+                    error
                 )
             }
     }
+
 
     fun sendPacket(
         packet: BridgelinePacket
     ) {
 
-        if (connectedEndpoints.isEmpty()) {
+        val endpoints =
+            synchronized(connectedEndpoints) {
+
+                connectedEndpoints.toList()
+            }
+
+
+        if (endpoints.isEmpty()) {
 
             Log.e(
                 TAG,
-                "No connected devices"
+                "================================"
+            )
+
+            Log.e(
+                TAG,
+                "NO CONNECTED DEVICES"
+            )
+
+            Log.e(
+                TAG,
+                "Packet ${packet.id} was NOT sent."
+            )
+
+            Log.e(
+                TAG,
+                "Wait until CONNECTED appears in Logcat."
+            )
+
+            Log.e(
+                TAG,
+                "================================"
             )
 
             return
         }
 
-        seenPacketIds.add(
-            packet.id
-        )
+
+        synchronized(seenPacketIds) {
+
+            seenPacketIds.add(
+                packet.id
+            )
+        }
+
+
+        val json =
+            packet.toJson()
 
         val payload =
             Payload.fromBytes(
-                packet.toJson()
-                    .toByteArray(Charsets.UTF_8)
+                json.toByteArray(
+                    Charsets.UTF_8
+                )
             )
+
+
+        Log.d(
+            TAG,
+            "================================"
+        )
+
+        Log.d(
+            TAG,
+            "SENDING PACKET"
+        )
+
+        Log.d(
+            TAG,
+            "ID: ${packet.id}"
+        )
+
+        Log.d(
+            TAG,
+            "TTL: ${packet.ttl}"
+        )
+
+        Log.d(
+            TAG,
+            "Targets: ${endpoints.size}"
+        )
+
+        Log.d(
+            TAG,
+            "================================"
+        )
+
 
         connectionsClient
             .sendPayload(
-                connectedEndpoints.toList(),
+                endpoints,
                 payload
             )
             .addOnSuccessListener {
 
                 Log.d(
                     TAG,
-                    "Packet sent: ${packet.id}"
+                    "PACKET SENT SUCCESSFULLY: " +
+                            packet.id
                 )
-
             }
-            .addOnFailureListener {
+            .addOnFailureListener { error ->
 
                 Log.e(
                     TAG,
-                    "Packet send failed",
-                    it
+                    "PACKET SEND FAILED: " +
+                            packet.id,
+                    error
                 )
             }
     }
+
+
 
     private fun relayPacket(
         packet: BridgelinePacket,
         sourceEndpointId: String
     ) {
 
-        val relayEndpoints =
-            connectedEndpoints.filter {
-                it != sourceEndpointId
-            }
-
-        if (relayEndpoints.isEmpty()) {
+        if (packet.ttl <= 0) {
 
             Log.d(
                 TAG,
-                "No relay nodes available"
+                "TTL reached zero. Not relaying."
             )
 
             return
         }
 
+
+        /*
+         * Only send to connected devices other than
+         * the device that sent this packet to us.
+         */
+
+        val relayEndpoints =
+            synchronized(connectedEndpoints) {
+
+                connectedEndpoints
+                    .filter {
+                        it != sourceEndpointId
+                    }
+            }
+
+
+        if (relayEndpoints.isEmpty()) {
+
+            Log.d(
+                TAG,
+                "No other connected relay nodes."
+            )
+
+            return
+        }
+
+
+        val json =
+            packet.toJson()
+
+
         val payload =
             Payload.fromBytes(
-                packet.toJson()
-                    .toByteArray(Charsets.UTF_8)
+                json.toByteArray(
+                    Charsets.UTF_8
+                )
             )
+
+
+        Log.d(
+            TAG,
+            "================================"
+        )
+
+        Log.d(
+            TAG,
+            "RELAYING PACKET"
+        )
+
+        Log.d(
+            TAG,
+            "ID: ${packet.id}"
+        )
+
+        Log.d(
+            TAG,
+            "New TTL: ${packet.ttl}"
+        )
+
+        Log.d(
+            TAG,
+            "Relay targets: ${relayEndpoints.size}"
+        )
+
+        Log.d(
+            TAG,
+            "================================"
+        )
+
 
         connectionsClient
             .sendPayload(
@@ -366,27 +831,58 @@ class NearbyManager(
 
                 Log.d(
                     TAG,
-                    "Packet relayed: ${packet.id}"
+                    "PACKET RELAYED: ${packet.id}"
                 )
 
                 onRelay(packet)
             }
-            .addOnFailureListener {
+            .addOnFailureListener { error ->
 
                 Log.e(
                     TAG,
-                    "Packet relay failed",
-                    it
+                    "PACKET RELAY FAILED: ${packet.id}",
+                    error
                 )
             }
     }
 
+
+    // =========================================================
+    // STOP
+    // =========================================================
+
     fun stop() {
 
-        connectionsClient.stopAdvertising()
-        connectionsClient.stopDiscovery()
-        connectionsClient.stopAllEndpoints()
+        Log.d(
+            TAG,
+            "Stopping Bridgeline network"
+        )
 
-        connectedEndpoints.clear()
+
+        connectionsClient
+            .stopAdvertising()
+
+        connectionsClient
+            .stopDiscovery()
+
+        connectionsClient
+            .stopAllEndpoints()
+
+
+        synchronized(connectedEndpoints) {
+            connectedEndpoints.clear()
+        }
+
+        synchronized(pendingConnections) {
+            pendingConnections.clear()
+        }
+
+        synchronized(seenPacketIds) {
+            seenPacketIds.clear()
+        }
+
+        synchronized(relayedPacketIds) {
+            relayedPacketIds.clear()
+        }
     }
 }
